@@ -119,14 +119,10 @@ SDFormer/
 如果本工作对您有帮助，请引用：
 
 ```bibtex
-@article{sdformer2025,
+@article{sdformer2026,
   title     = {SDFormer: Multi-Granularity Time Series Modeling for Computing Power Network Supply-Demand Forecasting},
-  year      = {2025}
+  year      = {2026}
 }
 ```
 
 ---
-
-## 致谢
-
-本项目基于 [Time-Series-Library](https://github.com/thuml/Time-Series-Library) 框架实现，感谢 PatchTST 和 iTransformer 的开源工作。
