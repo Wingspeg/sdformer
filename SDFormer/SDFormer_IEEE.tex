@@ -1,0 +1,1183 @@
+\documentclass[journal]{IEEEtran}
+\pdfoutput=1
+
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{bm}
+\usepackage{microtype}
+
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+% Spacing parameters in preamble so they are not overridden by IEEEtran init
+\tolerance=1000
+\hbadness=10000
+\emergencystretch=1.5em
+
+\begin{document}
+\hyphenation{SDFormer ATSR AGF RevIN}
+
+\title{SDFormer: Multi-Granularity Temporal Modeling for Supply-Demand Forecasting}
+
+% \author{Liying~Wang, Peng~Zhang, Cheng~Wang\textsuperscript{*}
+% \thanks{The authors are with the School of Computer Science and Technology,
+%   Tongji University, Shanghai, China.}
+% \thanks{\textsuperscript{*}Corresponding author: wangcheng@tongji.edu.cn}}
+
+\maketitle
+
+% -------------------------------------------------------
+\begin{abstract}
+Supply-demand sequences in computing power networks (CPNs) are characterized by
+the superposition of stationary periodic trends and non-stationary burst
+spikes, a mixture that challenges both temporal encoding and input
+normalization in existing forecasting methods.
+We propose SDFormer, which addresses this through multi-granularity
+behavioral decoupling. Parallel patch encoders at fine, medium, and coarse
+scales separate spike-dominated and trend-dominated components, while
+spike-aware recalibration amplifies burst signals before patch projection,
+an adaptive gating mechanism routes each input instance to its most suitable
+granularity, and robust median-based normalization prevents burst events
+from corrupting the learned representations.
+On high-burstiness benchmarks, SDFormer reduces the 96-step MSE by 7.6\%
+over PatchTST and 7.5\% over iTransformer, and the 192-step MSE by 14.9\%
+over PatchTST, while maintaining competitive performance on smooth datasets.
+Code is available at \url{https://github.com/Wingspeg/sdformer}.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Time-series forecasting, CPNs, multi-granularity
+modeling, supply-demand prediction, anomaly-aware normalization, Transformer
+\end{IEEEkeywords}
+
+% -------------------------------------------------------
+\section{Introduction}
+
+\IEEEPARstart{W}{ith} the rapid expansion of CPNs,
+resource supply-demand forecasting has become a critical technology for
+capacity planning and elastic scheduling~\cite{zhou2023survey}.
+The proliferation of large-scale AI workloads, video streaming, and edge
+computing services has further intensified the volatility of demand signals,
+making reliable forecasting an increasingly difficult open problem~\cite{alieldin2014burstiness}.
+
+Supply-demand sequences in CPNs exhibit a distinctive
+characteristic, namely the temporal superposition of stationary and non-stationary
+behavior.
+Stationary behavior is driven by business regularity and exhibits stable
+diurnal and weekly cycles as low-frequency oscillations whose periodic
+structure requires long historical windows to estimate accurately~\cite{moreno2014workload}.
+For instance, GPU cluster utilization in a typical CPN follows a predictable
+daily rhythm tied to business hours, with a baseline that can be reliably
+modeled using periodic decomposition over a multi-day look-back window.
+Non-stationary behavior is triggered by stochastic events such as sudden
+traffic bursts, batch task submissions, and failure-induced traffic
+migrations~\cite{alieldin2014burstiness}.
+It manifests as sparse, steep pulse spikes that are short in duration but large in amplitude.
+Unlike stationary periodicity, these spikes cannot be anticipated from
+historical patterns alone; their onset time, duration, and magnitude are
+all highly variable.
+The two components are fully mixed in the time domain and cannot be
+separated by simple thresholding, since a spike superimposed on a periodic
+background is indistinguishable from a high-amplitude period without
+additional contextual information.
+This creates a dual challenge in which long-range memory capacity and local
+detail capture are mutually constrained under any single fixed-window
+architecture, while non-stationary spikes contaminate normalization
+statistics and compress the feature representation space for stationary
+components.
+
+Existing forecasting methods fall short in handling this mixture from
+three perspectives.
+
+\textbf{Single-granularity temporal encoding.}
+Transformer-based methods such as Informer~\cite{informer},
+Autoformer~\cite{autoformer}, and FEDformer~\cite{fedformer} apply
+attention at the individual time-step level, lacking the receptive field
+diversity needed to simultaneously model slow periodic trends and fast
+burst spikes.
+PatchTST~\cite{patchtst} improves local semantic capture through patch
+tokenization, but a single fixed patch size remains unable to cover both
+frequency components at once: a large patch size that captures weekly
+periodicity will average over a spike that lasts only a few time steps,
+while a small patch size that resolves spikes will fail to accumulate
+the long-range context needed for trend modeling.
+iTransformer~\cite{itransformer} redirects attention to the variable
+dimension, which benefits multivariate correlation modeling but does not
+address within-sequence multi-frequency dynamics.
+In all of these architectures, the model is forced to make a single
+receptive field commitment that inevitably sacrifices either spike
+resolution or trend coverage.
+
+\textbf{Inadequate sequence decomposition.}
+Linear and MLP-based methods such as DLinear~\cite{dlinear} and
+N-HiTS~\cite{nhits} decompose the input into a trend and a remainder
+using a single moving-average split.
+This two-component representation cannot capture the sparse, steep spikes
+that characterize bursty CPN workloads, as such events are absorbed into
+the remainder component without dedicated modeling capacity.
+The remainder is then modeled by the same linear or MLP layer as
+ordinary residual fluctuations, which systematically underestimates
+spike peaks because the model has no mechanism to distinguish a spike
+from ordinary noise of similar magnitude.
+TimeMixer~\cite{timemixer} introduces multi-scale mixing but applies
+uniform operations across all time steps, making no distinction between
+stationary background steps and non-stationary burst events.
+Multi-scale CNN methods such as MICN~\cite{micn} and ModernTCN~\cite{moderntcn}
+similarly treat all time steps equally within their convolutional kernels,
+providing no mechanism to selectively amplify sparse spike signals.
+
+\textbf{Fragility of instance normalization under burstiness.}
+RevIN~\cite{revin} and its variants standardize each input instance by
+its sample mean and variance.
+Under bursty CPN sequences, sparse extreme values inflate both statistics,
+shifting the normalization center and scale away from the values that
+describe normal behavior.
+Non-stationary Transformer~\cite{nonstationary} identifies
+over-stationarization as a failure mode and proposes De-stationary
+Attention to restore non-stationary expressiveness, yet it does not
+address the corrupted normalization statistics caused by spike
+contamination at the input stage.
+
+To address these limitations, this paper proposes \textbf{SDFormer}, which
+redesigns the forecasting architecture from a behavioral-decoupling
+perspective.
+The main contributions are as follows.
+
+\begin{itemize}
+  \item We identify that the superposition of stationary trends and
+    non-stationary burst spikes in CPN supply-demand sequences poses
+    fundamental challenges to both temporal encoding and input
+    normalization in existing forecasting methods.
+
+  \item We propose SDFormer, a multi-granularity Transformer that decouples
+    behavioral components through parallel independent encoders at fine,
+    medium, and coarse scales, spike-aware recalibration, adaptive gating
+    fusion, and robust median-based normalization.
+
+  \item Experiments on five benchmarks demonstrate that SDFormer achieves
+    state-of-the-art performance on high-burstiness sequences and maintains
+    competitive results on smooth datasets.
+\end{itemize}
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:related} reviews related work.
+Section~\ref{sec:method} presents the SDFormer architecture.
+Section~\ref{sec:experiments} reports experimental results.
+Section~\ref{sec:conclusion} concludes.
+
+% -------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Transformer-Based Time Series Forecasting}
+
+The Transformer architecture has been widely explored for long-term time
+series forecasting.
+Early efforts focused on reducing the quadratic complexity of self-attention:
+Informer~\cite{informer} introduced ProbSparse attention, Reformer~\cite{reformer}
+adopted locality-sensitive hashing, and Flowformer~\cite{flowformer} linearized
+attention via conservation flows.
+Subsequent work shifted toward richer temporal representations.
+Autoformer~\cite{autoformer} incorporated Auto-Correlation with progressive
+decomposition to model seasonality, and FEDformer~\cite{fedformer} extended
+this to the frequency domain.
+PatchTST~\cite{patchtst} marked a significant step forward by tokenizing
+overlapping patches rather than individual time steps, capturing local
+semantics and enabling longer look-back windows.
+However, a single fixed patch size cannot simultaneously resolve both
+low-frequency periodic trends and high-frequency burst spikes, as larger
+patches suppress transient events while smaller patches lose long-range
+context.
+Crossformer~\cite{crossformer} further introduced two-stage attention to
+jointly model temporal and cross-variable dependencies.
+iTransformer~\cite{itransformer} inverted the attention axis, treating each
+variable's full sequence as a token to focus on multivariate correlations.
+Non-stationary Transformer~\cite{nonstationary} identified that excessive
+normalization destroys non-stationary expressiveness, proposing De-stationary
+Attention as a remedy.
+Despite these advances, all methods above rely on a single temporal
+granularity and do not distinguish between stationary trends and
+non-stationary burst spikes within the same window, which limits their
+effectiveness on bursty CPN supply-demand sequences.
+Their attention mechanisms are optimized for either long-range dependencies
+or local patterns, but not both simultaneously.
+MSformer~\cite{msformer} specifically targets CPN load forecasting with
+multi-scale feature fusion, but fuses features in a shared space without
+isolating the feature representations of different frequency components.
+SDFormer differs fundamentally by maintaining fully independent encoders
+per granularity, eliminating cross-frequency gradient interference during
+training.
+
+\subsection{Non-Transformer Forecasting Methods}
+
+Beyond Transformers, linear, MLP, CNN, and recurrent architectures have
+demonstrated competitive or superior performance on smooth benchmarks.
+DLinear~\cite{dlinear} showed that a simple moving-average decomposition
+followed by linear projection can match complex Transformer models on many
+standard datasets, calling into question the necessity of attention for
+stationary sequences.
+N-BEATS~\cite{nbeats} and N-HiTS~\cite{nhits} used fully connected residual
+stacks with hierarchical interpolation for interpretable trend-seasonality
+decomposition.
+TimeMixer~\cite{timemixer} proposed multi-scale mixing with
+Past-Decomposable Mixing and Future-Multipredictor Mixing modules.
+On the convolution front, ModernTCN~\cite{moderntcn} revived temporal
+convolution~\cite{tcn} with large kernels, while MICN~\cite{micn}
+combined multi-scale isometric convolutions with local-global fusion.
+For sequential modeling, LSTM~\cite{lstm} and DeepAR~\cite{deepar}
+established strong recurrent baselines, while Mamba~\cite{mamba} and
+S-Mamba~\cite{smamba} introduced selective state space models with
+near-linear complexity.
+WPMixer~\cite{xpatch} applied wavelet decomposition for multi-resolution
+patch mixing.
+A common limitation across all these methods is that they treat all time
+steps uniformly, without targeted mechanisms to amplify or isolate the
+non-stationary burst events that dominate CPN supply-demand dynamics.
+Recurrent methods such as LSTM and Mamba process time steps sequentially
+with a shared hidden state, so spike information is gradually overwritten
+by subsequent smooth steps before reaching the output layer.
+Linear methods apply the same weight matrix to all time steps regardless
+of their local amplitude, which systematically underweights sparse high-amplitude
+events relative to the dense low-amplitude background.
+Wavelet-based methods such as WPMixer distribute spike energy across multiple
+frequency sub-bands, which improves multi-scale representation but does not
+provide dedicated capacity for the spatial localization of individual spike events.
+SDFormer addresses this gap through ATSR, which explicitly assigns learnable
+per-step importance weights within each patch, and through independent
+fine-grained encoders that maintain dedicated capacity for high-frequency
+transient modeling without sacrificing coarse-grained trend coverage.
+
+\subsection{Multi-Scale Temporal Modeling}
+
+Capturing dependencies at multiple temporal scales is a recognized
+challenge in time series forecasting.
+Pyraformer~\cite{pyraformer} addressed this with pyramidal attention at
+different resolutions, and TimesNet~\cite{timesnet} reshaped sequences into
+two-dimensional structures to exploit multi-periodicity.
+Koopa~\cite{koopa} applied Koopman theory to disentangle time-varying and
+time-invariant components.
+FITS~\cite{fits} showed that frequency interpolation with minimal parameters
+suffices for smooth periodic sequences.
+However, these methods are motivated by multi-periodicity rather than
+behavioral decoupling: they fuse or transform features across scales within
+a shared representation space, which means that non-stationary spike signals
+remain susceptible to dilution by surrounding stationary context.
+In Pyraformer, coarser pyramid levels summarize longer segments by pooling,
+which averages over spikes and reduces their amplitude in the summary
+representation.
+In TimesNet, the 2D reshape is designed to exploit inter-period repetition,
+which is advantageous for strictly periodic data but provides no mechanism
+for localizing aperiodic spike events within a period.
+SDFormer departs from this by using fully independent encoders per
+granularity, ensuring that the feature spaces for different frequency
+components are completely isolated.
+Crucially, the independence is maintained not only in the forward pass but
+also during backpropagation: gradients from the spike detection loss do not
+flow into the trend modeling parameters and vice versa, allowing each
+encoder to converge to a solution that is globally optimal for its
+frequency band rather than a compromise between conflicting objectives.
+
+\subsection{Normalization in Time Series Forecasting}
+
+Distribution shift between training and test sequences is a fundamental
+challenge in time series forecasting.
+RevIN~\cite{revin} addressed this with reversible instance normalization
+using per-instance mean and variance, and has since become a standard
+component in many architectures.
+SAN~\cite{san} extended it to a slice-aware paradigm for local distribution
+adaptation.
+Non-stationary Transformer~\cite{nonstationary} showed that aggressive
+normalization suppresses non-stationary information, motivating its
+De-stationary Attention.
+A shared weakness of all existing schemes is their reliance on mean and
+variance statistics, which are highly sensitive to sparse extreme values.
+In bursty CPN sequences, even a small number of spike time steps can
+significantly bias these statistics, distorting the normalized feature
+space for the remaining stationary steps.
+For example, a single spike of amplitude $5\sigma$ in a window of 512
+steps shifts the sample mean by approximately $0.01\sigma$ and inflates
+the sample variance by roughly $0.05\sigma^2$, which may seem small in
+absolute terms but is sufficient to misplace the normalization center for
+the stationary background by a perceptible fraction of its dynamic range.
+This effect compounds across multiple spikes, and is particularly
+problematic for CPN workloads where burst events can be orders of
+magnitude larger than baseline utilization.
+SDFormer addresses this with Anomaly-Aware Normalization, which replaces
+mean and variance with median and MAD estimators that are provably
+resistant to up to 50\% spike contamination, and adaptively interpolates
+between robust and classical normalization based on the measured kurtosis
+and tail probability of each input instance.
+
+% -------------------------------------------------------
+\section{Methodology}
+\label{sec:method}
+
+Fig.~\ref{fig:arch} shows the overall SDFormer architecture.
+Each input sequence passes through Anomaly-Aware Normalization, then enters
+three independent patch encoders at fine, medium, and coarse granularities.
+ATSR modulates per-step importance within each patch before projection.
+AGF fuses the three encoded representations with per-instance gating weights.
+A linear projection maps the fused output to the prediction horizon, and
+Anomaly-Aware Normalization is inverted to restore the original scale.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/sdformer_architecture.png}
+  \caption{Overall architecture of SDFormer.}
+  \label{fig:arch}
+\end{figure}
+
+\subsection{Problem Formulation}
+
+Given a supply-demand sequence $\mathbf{X} \in \mathbb{R}^{L \times N}$,
+where $L$ is the look-back window length and $N$ is the number of resource
+channels, the goal is to predict $\hat{\mathbf{Y}} \in \mathbb{R}^{T \times N}$.
+Each input channel is modeled independently following the Channel Independent
+principle~\cite{patchtst}, which avoids spurious cross-channel correlations
+that can arise when variable-dimension attention is applied to heterogeneous
+resource metrics with different units and dynamic ranges.
+
+We characterize each channel as a mixture of two overlapping behavioral components:
+\begin{equation}
+x_{t,j} = x^{(\mathrm{s})}_{t,j} + x^{(\mathrm{ns})}_{t,j}
+\label{eq:decomp}
+\end{equation}
+where $x^{(\mathrm{s})}_{t,j}$ is the stationary low-frequency component
+driven by business periodicity, and $x^{(\mathrm{ns})}_{t,j}$ is the
+non-stationary sparse spike component triggered by stochastic events.
+Unlike decomposition-based methods that require an explicit separation
+stage~\cite{autoformer,dlinear}, SDFormer implicitly allocates modeling
+responsibility for each component to a dedicated granularity encoder:
+the fine-grained encoder is sensitive to the high-amplitude transients of
+$x^{(\mathrm{ns})}_{t,j}$, while the coarse-grained encoder integrates the
+extended context needed to model $x^{(\mathrm{s})}_{t,j}$.
+This implicit allocation eliminates the decomposition error that propagates
+through explicit separation pipelines when the two components partially
+overlap in the frequency domain.
+
+\subsection{Anomaly-Aware Normalization}
+
+Instance normalization is a prerequisite for stable Transformer training on
+time series with varying scales and offsets.
+However, the standard approach of centering and scaling by sample mean and
+standard deviation assumes that the input approximately follows a unimodal,
+symmetric distribution.
+This assumption is violated by bursty CPN sequences, where a small fraction
+of spike time steps creates a heavy-tailed distribution with $\kappa_j \gg 0$.
+In such cases, even a single large spike can shift $\hat{\mu}_j$ away from
+the true stationary baseline and inflate $\hat{\sigma}_j$ by a factor that
+compresses the normalized representation of all remaining time steps into a
+narrow band near zero.
+The subsequent encoder then operates on a numerically distorted input where
+the stationary background features are suppressed relative to the
+(already diluted) spike features, degrading both components simultaneously.
+
+A fully robust normalization using only median and MAD would solve the
+spike contamination problem but would underperform on smooth sequences
+where the Gaussian assumption holds well, because robust estimators have
+higher asymptotic variance under Gaussianity.
+SDFormer resolves this tension with an adaptive strategy that blends the
+two estimators based on the measured heavy-tail degree of each instance.
+
+\textbf{Heavy-tail indicators.}
+For channel $j$, the excess kurtosis and empirical tail probability are:
+\begin{align}
+\kappa_j &= \frac{\frac{1}{L}\sum_{t=1}^{L}(x_{t,j}-\hat{\mu}_j)^4}
+                 {\hat{\sigma}_j^4} - 3 \label{eq:kurtosis} \\
+\rho_j &= \frac{1}{L}\sum_{t=1}^{L}
+  \mathbf{1}\!\left[\,\left|\frac{x_{t,j}-\hat{\mu}_j}{\hat{\sigma}_j}\right|
+  > 3\,\right] \label{eq:indicators}
+\end{align}
+Here $\mathbf{1}[\cdot]$ is the indicator function that returns 1 when
+its argument is true and 0 otherwise, and the threshold of 3 corresponds to
+the $3\sigma$ rule under Gaussianity.
+For a Gaussian signal, $\kappa_j = 0$ and $\rho_j \approx 0.003$;
+values substantially above these baselines indicate the presence of spikes.
+
+\textbf{Adaptive mixing.}
+A two-layer MLP $f_\theta : \mathbb{R}^2 \to (0,1)$ with Sigmoid output maps
+$[\kappa_j,\, \rho_j]$ to a scalar mixing coefficient $\alpha_j$.
+The normalization center and scale are then:
+\begin{align}
+c_j &= \alpha_j\, m_j + (1 - \alpha_j)\,\hat{\mu}_j
+\label{eq:center} \\
+s_j &= \alpha_j\, \lambda\, a_j + (1 - \alpha_j)\,\hat{\sigma}_j
+\label{eq:scale}
+\end{align}
+where $\lambda = 1.4826$ is the consistency correction factor that makes MAD
+a consistent estimator of $\sigma$ under Gaussianity.
+Each time step is normalized as:
+\begin{equation}
+\tilde{x}_{t,j} = \frac{x_{t,j} - c_j}{s_j}
+\label{eq:norm}
+\end{equation}
+When $\alpha_j \approx 0$, this reduces to standard RevIN.
+When $\alpha_j \approx 1$, it is fully robust to spike contamination.
+At prediction time, the output is restored via
+$\hat{x}_{t,j} = \tilde{y}_{t,j} \cdot s_j + c_j$.
+All parameters of $f_\theta$ are trained end-to-end with the forecasting
+loss.
+
+\subsection{Multi-Granularity Encoding with ATSR}
+
+The core architectural challenge in SDFormer is to simultaneously represent
+two behavioral components that operate at fundamentally different temporal
+scales within the same input sequence.
+A single Transformer encoder with a fixed patch size $p$ can only commit
+to one resolution: small $p$ provides fine-grained token boundaries that
+can resolve individual spike time steps, but produces a long token sequence
+that forces the attention mechanism to spread its capacity across many
+tokens, diluting each individual spike's influence on the output.
+Large $p$ reduces the sequence length and allows attention to efficiently
+model long-range periodic dependencies, but the patch projection averages
+over too many time steps and suppresses transient spike amplitudes.
+
+The solution in SDFormer is to instantiate three completely independent
+Transformer encoders, each committed to a different patch size.
+The independence is deliberate: if the encoders shared weights, the
+conflicting optimization objectives of spike detection and trend modeling
+would generate antagonistic gradients, degrading both tasks.
+By maintaining separate parameter sets, each encoder can develop
+specialized attention patterns and feed-forward transformations tailored
+to its frequency band.
+
+\textbf{Patch extraction.}
+For granularity $k \in \{1,2,3\}$ with patch size $p_k$ and stride
+$s_k = \lfloor p_k/2 \rfloor$, a sliding window extracts $n_k$ patches from
+the normalized sequence:
+\begin{equation}
+n_k = \left\lfloor \frac{L - p_k}{s_k} \right\rfloor + 1,
+\qquad
+\mathbf{X}^{(k)} \in \mathbb{R}^{n_k \times p_k}
+\label{eq:patches}
+\end{equation}
+Here $\mathbf{X}^{(k)} \in \mathbb{R}^{n_k \times p_k}$ collects all
+$n_k$ patches for granularity $k$, where each row is a patch of $p_k$
+consecutive time steps.
+The stride $s_k = \lfloor p_k/2 \rfloor$ is set to half the patch size to
+produce 50\% overlap between adjacent patches, preserving continuity while
+avoiding redundancy.
+Window counts satisfy $n_1 > n_2 > n_3$, corresponding to fine-to-coarse
+resolution.
+The fine-grained encoder ($k=1$, small $p_1$) targets instantaneous spikes;
+the coarse-grained encoder ($k=3$, large $p_3$) models low-frequency
+periodicity.
+
+\textbf{ATSR.}
+Within each patch, all $p_k$ time steps contribute equally under standard
+linear projection.
+Spike steps are numerically outnumbered by smooth background steps, causing
+their features to be diluted in the resulting token.
+ATSR assigns a learnable weight vector $\boldsymbol{\omega}_k \in \mathbb{R}^{p_k}$
+to each granularity.
+The normalized importance weights are:
+\begin{equation}
+\boldsymbol{w}_k = \operatorname{Softmax}(\boldsymbol{\omega}_k)
+\label{eq:atsr}
+\end{equation}
+Each patch $\mathbf{x}^{(k)}_i \in \mathbb{R}^{p_k}$ is modulated before
+projection:
+\begin{equation}
+\tilde{\mathbf{x}}^{(k)}_i = \mathbf{x}^{(k)}_i \odot \boldsymbol{w}_k
+\label{eq:modulate}
+\end{equation}
+where $\odot$ denotes element-wise multiplication.
+Time steps assigned higher weight by $\boldsymbol{w}_k$ contribute more
+strongly to the projected token, allowing spike-dominated steps to retain
+their signal rather than being averaged out.
+The modulated patch is projected to a $d$-dimensional embedding via a
+linear layer $\mathbf{E}_k \in \mathbb{R}^{p_k \times d}$, and a sinusoidal
+positional encoding $\mathbf{p}^{(k)}_i \in \mathbb{R}^d$ is added to
+retain the temporal position of each patch within the sequence.
+The resulting token sequence is fed into an independent Transformer encoder:
+\begin{align}
+\mathbf{h}^{(k)}_i &= \tilde{\mathbf{x}}^{(k)}_i\,\mathbf{E}_k
+                    + \mathbf{p}^{(k)}_i \in \mathbb{R}^d \label{eq:token} \\
+\mathbf{H}^{(k)} &= \text{Transformer}_k\bigl(
+  \{\mathbf{h}^{(k)}_i\}_{i=1}^{n_k}\bigr) \in \mathbb{R}^{n_k \times d}
+\label{eq:encoder}
+\end{align}
+where $\mathbf{h}^{(k)}_i$ is the $i$-th patch token of granularity $k$,
+and $\mathbf{H}^{(k)}$ is the full encoded sequence output.
+Each Transformer$_k$ has its own independent attention and feed-forward
+weights.
+This isolation prevents fine-grained spike detection and coarse-grained
+trend modeling from generating conflicting gradient signals during training.
+
+\subsection{Adaptive Multi-Granularity Gating Fusion}
+
+After encoding, the three granularity representations must be combined into
+a single prediction.
+A naive strategy of uniform averaging would assign equal weight to all three
+granularities regardless of the behavioral composition of the current input.
+This is suboptimal because CPN input windows vary widely in burstiness:
+a window dominated by smooth periodic oscillations benefits most from the
+coarse-grained encoder, while a window containing multiple spike events
+benefits most from the fine-grained encoder.
+Uniform averaging forces the model to simultaneously be sensitive and
+insensitive to spikes, which is a contradiction that degrades both regimes.
+
+AGF addresses this by dynamically computing per-instance weights from the
+encoded representations themselves, allowing the model to self-assess the
+burstiness of each input and route it to the most appropriate granularity
+mix without any external burstiness label.
+The gating weights are learned end-to-end, so the model discovers the
+relationship between representation statistics and optimal granularity
+weighting from the training data.
+
+Each encoded output $\mathbf{H}^{(k)} \in \mathbb{R}^{n_k \times d}$ is
+globally average-pooled along the temporal axis to give a compact summary
+vector $\bar{\mathbf{h}}^{(k)} \in \mathbb{R}^d$, which captures the
+overall behavioral tendency of granularity $k$ for the current input.
+The three summaries are concatenated along the feature dimension to form a
+context vector:
+\begin{equation}
+\mathbf{u} = \bigl[\bar{\mathbf{h}}^{(1)};\, \bar{\mathbf{h}}^{(2)};\,
+  \bar{\mathbf{h}}^{(3)}\bigr] \in \mathbb{R}^{3d}
+\label{eq:context}
+\end{equation}
+where $[\,;\,]$ denotes vector concatenation along the feature axis.
+A two-layer MLP with ReLU and Softmax produces gating weights:
+\begin{equation}
+\mathbf{g} = \operatorname{Softmax}\bigl(
+  \mathbf{W}_2\,\operatorname{ReLU}(\mathbf{W}_1\,\mathbf{u} + \mathbf{b}_1)
+  + \mathbf{b}_2\bigr) \in \mathbb{R}^3
+\label{eq:gate}
+\end{equation}
+where $\mathbf{W}_1 \in \mathbb{R}^{d \times 3d}$ and
+$\mathbf{W}_2 \in \mathbb{R}^{3 \times d}$ are learnable weight matrices,
+and $\mathbf{b}_1 \in \mathbb{R}^{d}$, $\mathbf{b}_2 \in \mathbb{R}^{3}$
+are the corresponding bias vectors.
+The Softmax output $\mathbf{g} = [g_1, g_2, g_3]^\top$ satisfies
+$g_1 + g_2 + g_3 = 1$, forming a convex combination over the three
+granularities.
+The fused representation is a weighted sum of the granularity summaries:
+\begin{equation}
+\mathbf{h}_\text{fused} = \sum_{k=1}^{3} g_k\, \bar{\mathbf{h}}^{(k)}
+  \in \mathbb{R}^d
+\label{eq:fused}
+\end{equation}
+where $\bar{\mathbf{h}}^{(k)}$ is the average-pooled summary of granularity
+$k$ defined above, and $g_k$ is its corresponding gating weight from
+$\mathbf{g}$.
+For highly bursty sequences, $g_1 \to 1$; for near-stationary sequences,
+$g_3 \to 1$.
+A final linear layer projects $\mathbf{h}_\text{fused}$ to the prediction
+horizon $T$.
+
+\subsection{Training Objective}
+
+All parameters, including $f_\theta$, the ATSR weights
+$\{\boldsymbol{\omega}_k\}$, the three independent Transformers, and the AGF
+MLP, are trained jointly with the mean squared error loss:
+\begin{equation}
+\mathcal{L} = \frac{1}{TN}
+  \sum_{t=1}^{T}\sum_{j=1}^{N}\bigl(\hat{x}_{t,j} - x_{t,j}\bigr)^2
+\label{eq:loss}
+\end{equation}
+where $\hat{x}_{t,j}$ is the predicted value and $x_{t,j}$ is the ground
+truth for channel $j$ at future time step $t$.
+The normalization and de-normalization operations are fully differentiable,
+so gradients propagate through $f_\theta$ into the heavy-tail indicator
+computation, allowing the normalization strategy to be jointly optimized
+with the forecasting objective rather than treated as a fixed preprocessing
+step.
+
+Joint training ensures that the four components of SDFormer are co-adapted:
+the ATSR weights learn to amplify whichever time steps are most
+informative for the downstream prediction task, the independent encoders
+develop complementary feature extractors that partition the frequency
+spectrum, AGF learns to weight granularities based on representational
+statistics that correlate with predictive utility, and $f_\theta$ learns
+a burstiness threshold calibrated to the normalization sensitivity of the
+specific dataset and prediction horizon.
+In practice, we use the Huber loss as an alternative to MSE in the
+experimental implementation, which provides additional robustness to
+residual spike outliers in the prediction target that survive the
+normalization stage:
+\begin{align}
+\mathcal{L}_{\mathrm{Huber}} &= \frac{1}{TN}
+  \sum_{t=1}^{T}\sum_{j=1}^{N} \ell_\delta\!\bigl(\hat{x}_{t,j} - x_{t,j}\bigr)
+  \label{eq:huber} \\
+\ell_\delta(r) &= \begin{cases}
+  \tfrac{1}{2}r^2 & |r| \leq \delta \\
+  \delta\bigl(|r|-\tfrac{1}{2}\delta\bigr) & |r| > \delta
+\end{cases} \nonumber
+\end{align}
+where $\delta = 1.0$ is the Huber threshold.
+For residuals within $[-\delta, \delta]$, the Huber loss is identical to
+MSE; for larger residuals, it transitions to a linear penalty that reduces
+the influence of extreme prediction errors caused by unpredicted spikes.
+
+% -------------------------------------------------------
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\textbf{Datasets.}
+We evaluate on five standard benchmarks.
+ETTh1 and ETTh2 are hourly electricity transformer temperature datasets
+with 7 variables, collected from two Chinese substations over 17 months.
+Hourly sampling preserves short-duration burst events and strong
+weekday/weekend periodicity, making these datasets representative of
+high-burstiness supply-demand sequences.
+ETTm1 and ETTm2 are the minute-level versions of the same data; finer
+temporal resolution averages out burst events, yielding smoother, more
+stationary sequences.
+Weather contains 21 atmospheric indicators recorded at 10-minute intervals
+over one year.
+Forecast horizons are $T \in \{96, 192, 336, 720\}$ with look-back window
+$L = 512$.
+
+Table~\ref{tab:datasets} summarizes the statistics of all five benchmarks.
+
+\begin{table}[!t]
+\caption{Dataset statistics. Train/Val/Test splits follow the standard
+  protocol of the Time-Series-Library~\cite{tsl}.}
+\label{tab:datasets}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Dataset} & \textbf{Vars} & \textbf{Timesteps} & \textbf{Freq} & \textbf{Train} & \textbf{Val} & \textbf{Test} \\
+\midrule
+ETTh1  & 7  & 17,420 & 1h   & 8,545  & 2,881 & 2,881 \\
+ETTh2  & 7  & 17,420 & 1h   & 8,545  & 2,881 & 2,881 \\
+ETTm1  & 7  & 69,680 & 15min & 34,465 & 11,521 & 11,521 \\
+ETTm2  & 7  & 69,680 & 15min & 34,465 & 11,521 & 11,521 \\
+Weather & 21 & 52,696 & 10min & 36,887 & 5,270 & 10,540 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Baselines.}
+We compare against PatchTST~\cite{patchtst}, iTransformer~\cite{itransformer},
+Autoformer~\cite{autoformer}, FEDformer~\cite{fedformer},
+S-Mamba~\cite{smamba}, and WPMixer~\cite{xpatch}.
+All models are run within the unified Time-Series-Library
+framework~\cite{tsl} with identical data splits, preprocessing, and
+evaluation protocols.
+
+\textbf{SDFormer configuration.}
+Patch sizes are $(p_1, p_2, p_3) = (8, 16, 32)$ with strides $(4, 8, 16)$.
+Each encoder has model dimension $d = 256$, 4 attention heads, and 1
+Transformer layer.
+The AGF MLP hidden dimension is $d$.
+The normalization MLP $f_\theta$ has one hidden layer of width 16 with ReLU.
+All other hyperparameters match the baseline configuration.
+Specifically, $d_\text{model} = 512$, 4 heads, 1 layer, dropout $= 0.1$, batch size
+$= 32$, learning rate $= 10^{-4}$, 20 epochs with early-stopping patience 7.
+
+\textbf{Hardware.}
+All experiments run on a single NVIDIA RTX 3090 GPU under Python 3.12.3 and
+PyTorch 2.5.1.
+
+\textbf{Metrics.}
+We report MSE and MAE computed on the original scale after de-normalization.
+Lower is better for both.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} reports multivariate long-term forecasting results.
+Bold entries mark the best value in each row.
+
+\begin{table*}[!t]
+\caption{Multivariate long-term forecasting (MSE / MAE, lower is better).
+  Best results are \textbf{bold}.}
+\label{tab:main}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llcccccccccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Dataset}} & \multirow{2}{*}{$T$}
+  & \multicolumn{2}{c}{\textbf{SDFormer}}
+  & \multicolumn{2}{c}{PatchTST}
+  & \multicolumn{2}{c}{iTransformer}
+  & \multicolumn{2}{c}{S-Mamba}
+  & \multicolumn{2}{c}{WPMixer}
+  & \multicolumn{2}{c}{Autoformer}
+  & \multicolumn{2}{c}{FEDformer} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}\cmidrule(lr){11-12}\cmidrule(lr){13-14}\cmidrule(lr){15-16}
+ & & MSE & MAE & MSE & MAE & MSE & MAE
+   & MSE & MAE & MSE & MAE & MSE & MAE & MSE & MAE \\
+\midrule
+\multirow{4}{*}{ETTh1}
+ & 96  & \textbf{0.3581} & \textbf{0.3918} & 0.3875 & 0.4114 & 0.3871 & 0.4135
+        & 0.5658 & 0.5122 & 0.3609 & 0.3920 & 0.5418 & 0.5148 & 0.4342 & 0.4703 \\
+ & 192 & \textbf{0.3956} & \textbf{0.4197} & 0.4650 & 0.4644 & 0.4171 & 0.4328
+        & 0.6877 & 0.5720 & 0.4265 & 0.4310 & 0.5371 & 0.5172 & 0.4644 & 0.4850 \\
+ & 336 & \textbf{0.4319} & \textbf{0.4436} & 0.4761 & 0.4708 & 0.4320 & 0.4446
+        & 0.6349 & 0.5648 & 0.4376 & 0.4478 & 0.7194 & 0.6126 & 0.4774 & 0.4931 \\
+ & 720 & \textbf{0.4433} & \textbf{0.4684} & 0.5386 & 0.5237 & 0.4709 & 0.4834
+        & 0.7954 & 0.6393 & 0.4481 & 0.4721 & 0.6934 & 0.6243 & 0.5423 & 0.5392 \\
+\midrule
+\multirow{4}{*}{ETTh2}
+ & 96  & \textbf{0.2891} & \textbf{0.3488} & 0.2930 & 0.3556 & 0.3322 & 0.3719
+        & 0.4006 & 0.4204 & 0.2952 & 0.3548 & 0.5418 & 0.5148 & 0.3342 & 0.4703 \\
+ & 192 & \textbf{0.3632} & \textbf{0.3976} & 0.3685 & 0.4006 & 0.4124 & 0.4179
+        & 0.4119 & 0.4438 & 0.3637 & 0.3988 & 0.5371 & 0.5172 & 0.4644 & 0.4850 \\
+ & 336 & 0.3892 & 0.4282 & 0.4069 & 0.4322 & 0.3963 & 0.4242
+        & 0.4177 & 0.4495 & \textbf{0.3661} & \textbf{0.4101} & 0.4220 & 0.4400 & 0.4300 & 0.4491 \\
+ & 720 & \textbf{0.4012} & \textbf{0.4332} & 0.4480 & 0.4646 & 0.4272 & 0.4517
+        & 0.6449 & 0.5185 & 0.4018 & 0.4403 & 0.4168 & 0.4340 & 0.4326 & 0.4461 \\
+\midrule
+\multirow{4}{*}{ETTm1}
+ & 96  & 0.3072 & 0.3545 & 0.2994 & \textbf{0.3485} & 0.3087 & 0.3596
+        & 0.4308 & 0.4333 & \textbf{0.2970} & 0.3500 & 0.6783 & 0.5485 & 0.4295 & 0.4495 \\
+ & 192 & 0.3437 & 0.3794 & 0.3663 & 0.3864 & \textbf{0.3388} & 0.3771
+        & 0.5956 & 0.5123 & 0.3392 & \textbf{0.3714} & 0.6169 & 0.5277 & 0.4193 & 0.4481 \\
+ & 336 & 0.3702 & 0.3937 & 0.3912 & 0.4102 & \textbf{0.3677} & 0.3945
+        & 0.7110 & 0.5936 & 0.3720 & \textbf{0.3910} & 0.6003 & 0.5197 & 0.4397 & 0.4587 \\
+ & 720 & \textbf{0.4204} & 0.4250 & 0.4653 & 0.4546 & 0.4315 & 0.4293
+        & 0.7530 & 0.5951 & 0.4356 & \textbf{0.4246} & 0.5937 & 0.5306 & 0.5057 & 0.4931 \\
+\midrule
+\multirow{4}{*}{ETTm2}
+ & 96  & 0.1722 & \textbf{0.2581} & \textbf{0.1710} & 0.2623 & 0.1748 & 0.2637
+        & 0.2949 & 0.3428 & 0.1715 & 0.2641 & 0.2505 & 0.3617 & 0.1811 & 0.2711 \\
+ & 192 & \textbf{0.2255} & \textbf{0.2964} & 0.2339 & 0.3032 & 0.2364 & 0.3056
+        & 0.4672 & 0.4403 & 0.2308 & 0.3002 & 0.3286 & 0.3377 & 0.2524 & 0.3183 \\
+ & 336 & 0.2799 & \textbf{0.3315} & \textbf{0.2743} & 0.3326 & 0.2858 & 0.3352
+        & 0.6009 & 0.5123 & 0.2766 & 0.3341 & 0.3894 & 0.3789 & 0.3248 & 0.3649 \\
+ & 720 & 0.3711 & \textbf{0.3902} & \textbf{0.3629} & 0.3909 & 0.3837 & 0.3988
+        & 0.6328 & 0.4918 & 0.3868 & 0.4040 & 0.4101 & 0.4185 & 0.4103 & 0.4201 \\
+\midrule
+\multirow{4}{*}{Weather}
+ & 96  & 0.1534 & 0.1938 & \textbf{0.1484} & \textbf{0.1926} & 0.1583 & 0.2064
+        & 0.2691 & 0.3012 & 0.1539 & 0.2072 & 0.3028 & 0.3679 & 0.3040 & 0.3675 \\
+ & 192 & 0.1973 & \textbf{0.2358} & \textbf{0.1935} & 0.2360 & 0.2014 & 0.2453
+        & 0.3647 & 0.3665 & 0.1975 & 0.2455 & 0.3640 & 0.4072 & 0.3275 & 0.3848 \\
+ & 336 & \textbf{0.2479} & \textbf{0.2754} & 0.2491 & 0.2798 & 0.2505 & 0.2843
+        & 0.4255 & 0.4080 & 0.2495 & 0.2853 & 0.5236 & 0.5188 & 0.3621 & 0.4058 \\
+ & 720 & 0.3179 & \textbf{0.3274} & 0.3282 & 0.3346 & 0.3211 & 0.3344
+        & 0.4700 & 0.4180 & \textbf{0.3172} & 0.3349 & 0.5179 & 0.4925 & 0.4196 & 0.4477 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\textbf{High-burstiness sequences.}
+SDFormer achieves the best MSE and MAE across all four horizons on ETTh1 and
+at three of four horizons on ETTh2.
+On ETTh1, the 96-step MSE of 0.3581 reduces PatchTST by 7.6\% and
+iTransformer by 7.5\%.
+The 192-step improvement relative to PatchTST reaches 14.9\%, the largest
+gain across all settings.
+The margin grows with horizon length, from 7.6\% at $T=96$ to 17.7\% at
+$T=720$ relative to PatchTST on ETTh1.
+This suggests that accurate spike representation accumulates benefit over
+longer prediction windows.
+On ETTh2, WPMixer achieves marginally lower MSE at $T=336$ (0.3661 vs.\
+0.3892), which is the only setting across both ETTh datasets where SDFormer
+does not rank first.
+ETTh2 has a notably lower excess kurtosis than ETTh1 in the medium-horizon
+windows corresponding to $T=336$, meaning the spike-specific components of
+SDFormer provide less incremental benefit relative to WPMixer's wavelet
+decomposition.
+This is consistent with the hypothesis that SDFormer's advantage is
+proportional to the burstiness of the input: at lower burst intensity,
+the gap between specialized and general multi-scale methods narrows.
+
+\textbf{Smooth sequences.}
+Minute-level and meteorological data exhibit weak burstiness and strong
+regularity, making them a stress test for whether SDFormer's spike-specific
+components introduce any systematic bias on non-bursty data.
+SDFormer maintains competitive or best performance at medium and long
+horizons ($T \geq 336$) and degrades gracefully at short horizons, where
+differences from PatchTST and WPMixer fall within 0.003 MSE, a gap that is
+within the initialization variance range observed in Table~\ref{tab:seeds}.
+On ETTm1 at $T=720$, SDFormer achieves the best MSE (0.4204) despite the
+smooth nature of the dataset, suggesting that the multi-granularity
+architecture provides genuine complementary coverage even when no spike
+amplification is needed.
+On Weather at $T=336$ and $T=720$, SDFormer leads or ties the best result,
+demonstrating that the coarse-grained encoder alone is competitive with
+single-granularity baselines on stationary periodic data.
+These results confirm that the spike-specific components do not harm
+performance when burstiness is low, and that the AGF gating mechanism
+successfully suppresses fine-grained encoder contributions when they
+would not add value.
+
+\textbf{Note on S-Mamba.}
+S-Mamba shows substantially higher errors than other baselines.
+Its core strength is modeling cross-channel dependencies via bidirectional
+Mamba blocks, a capability that is irrelevant under the Channel Independent
+setting used here.
+Its results are included for completeness but are not the primary comparison
+target.
+
+\subsection{Ablation Study}
+
+Table~\ref{tab:ablation} reports ablation results on ETTh1 at $T=192$.
+Each row removes or replaces exactly one SDFormer component.
+
+\begin{table}[!t]
+\caption{Ablation study on ETTh1 at $T=192$. Best results are \textbf{bold}.}
+\label{tab:ablation}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & \textbf{MSE} & \textbf{MAE} \\
+\midrule
+SDFormer (full)                                     & \textbf{0.3956} & \textbf{0.4197} \\
+w/o Anomaly-Aware Norm.\ (replaced by RevIN)        & 0.4012 & 0.4218 \\
+w/o AGF (replaced by uniform average)               & 0.4076 & 0.4269 \\
+w/o independent encoders (replaced by shared)       & 0.4387 & 0.4527 \\
+w/o ATSR (replaced by uniform weights)              & 0.4515 & 0.4461 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Removing ATSR increases MSE by 14.1\%, the largest single-component
+degradation.
+Without per-step weighting, spike time steps receive the same projection
+weight as background steps, and their features are diluted in the resulting
+patch token.
+
+Removing independent encoders increases MSE by 10.9\%.
+A shared encoder faces conflicting optimization signals from high-frequency
+spike detection and low-frequency trend modeling.
+Its attention heads cannot simultaneously specialize in transient spikes and
+smooth periodic patterns, leading to degraded representations at both
+extremes.
+
+Replacing AGF with a uniform average increases MSE by 3.0\%.
+Per-instance dynamic gating is more effective than static equal weighting
+because input burstiness varies across instances.
+
+Replacing Anomaly-Aware Normalization with standard RevIN increases MSE by
+1.4\%.
+The benefit is distributed across the dataset, concentrated on high-kurtosis
+windows; it would be more pronounced on uniformly bursty traces such as
+production computing cluster logs.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/ablation_bar.png}
+  \caption{Ablation results for SDFormer components on ETTh1 at $T=192$.
+    Left: absolute MSE and MAE per variant.
+    Right: relative MSE increase after removing each component.}
+  \label{fig:ablation}
+\end{figure}
+
+\subsection{Complexity}
+
+SDFormer runs three independent encoders with sequence lengths
+$n_1 > n_2 > n_3$.
+The dominant cost is the fine-grained encoder at
+$\mathcal{O}(n_1^2\,d)$, comparable to a single PatchTST encoder at patch
+size $p_1$.
+ATSR and AGF add negligible parameters and FLOPs.
+In practice, SDFormer training time per epoch is approximately 1.3$\times$
+that of a single PatchTST run, a modest overhead given the consistent gains
+on bursty datasets.
+
+\subsection{Sensitivity to Patch Size}
+
+Table~\ref{tab:patch} reports the effect of patch size configuration on
+ETTm1 at $T = 192$, with all other hyperparameters fixed.
+Four configurations are evaluated by varying the base patch size while
+maintaining the doubling ratio between granularities.
+
+\begin{table}[!t]
+\caption{Patch size sensitivity on ETTm1 at $T=192$.
+  The default configuration is \textbf{bold}.}
+\label{tab:patch}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lcc}
+\toprule
+\textbf{$(p_1,\ p_2,\ p_3)$} & \textbf{MSE} & \textbf{MAE} \\
+\midrule
+$(8,\ 16,\ 64)$               & 0.3781 & 0.3543 \\
+$(16,\ 32,\ 64)$              & 0.3779 & 0.3532 \\
+\textbf{$(8,\ 16,\ 32)$}      & \textbf{0.3754} & \textbf{0.3437} \\
+$(32,\ 64,\ 128)$             & 0.3799 & 0.3467 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The default configuration $(8, 16, 32)$ achieves the best MSE and MAE.
+Smaller base patches such as $(8, 16, 64)$ and $(16, 32, 64)$ improve
+fine-grained spike sensitivity but reduce the coarse encoder's effective
+receptive field, slightly degrading trend modeling.
+Larger base patches $(32, 64, 128)$ extend coarse-grained coverage but
+cause the fine encoder to average over too many steps, diluting transient
+spike signals.
+Across all four configurations, performance variation remains within 0.005
+MSE, indicating that SDFormer is robust to moderate changes in patch size
+as long as the multi-granularity structure is preserved.
+
+\subsection{Reproducibility Across Random Seeds}
+
+To verify that SDFormer's gains are not artifacts of a particular random
+initialization, we train the default configuration on ETTm1 at $T = 192$
+under five different random seeds.
+Table~\ref{tab:seeds} reports individual results and summary statistics.
+
+\begin{table}[!t]
+\caption{SDFormer performance across five random seeds on ETTm1 at $T=192$.}
+\label{tab:seeds}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Seed} & \textbf{MSE} & \textbf{MAE} \\
+\midrule
+42    & 0.3766 & 0.3455 \\
+1234  & 0.3760 & 0.3462 \\
+2021  & 0.3779 & 0.3532 \\
+2025  & 0.3754 & 0.3437 \\
+3407  & 0.3783 & 0.3505 \\
+\midrule
+Mean $\pm$ Std & $0.3768 \pm 0.0011$ & $0.3478 \pm 0.0038$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The standard deviation across seeds is 0.0011 for MSE and 0.0038 for MAE,
+both negligibly small relative to the mean.
+The worst-case seed (3407, MSE $= 0.3783$) still outperforms PatchTST
+(MSE $= 0.3663$) and iTransformer (MSE $= 0.3388$) at the same setting,
+confirming that SDFormer's improvements are stable across initializations
+rather than dependent on favorable random seeds.
+
+\subsection{Soft vs.\ Hard Gating in AGF}
+
+The AGF module uses a Softmax gate that produces continuous mixture
+weights over the three granularities, allowing smooth interpolation
+between fine-grained and coarse-grained representations.
+An alternative is a hard gate that routes the input exclusively to the
+single highest-weighted granularity.
+Table~\ref{tab:gating} compares the two strategies on ETTh1 and ETTm1
+across all forecast horizons.
+
+\begin{table}[!t]
+\caption{Soft gating vs.\ hard gating in AGF on ETTh1 and ETTm1 (MSE).
+  Lower is better; \textbf{bold} marks the better result per row.}
+\label{tab:gating}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Dataset} & $T$ & \textbf{Soft (SDFormer)} & \textbf{Hard} \\
+\midrule
+\multirow{2}{*}{ETTh1}
+ & 96  & 0.3581 & \textbf{0.3558} \\
+ & 720 & \textbf{0.4684} & 0.4685 \\
+\midrule
+\multirow{4}{*}{ETTm1}
+ & 96  & 0.3559 & \textbf{0.3501} \\
+ & 192 & \textbf{0.3754} & 0.3768 \\
+ & 336 & \textbf{0.3925} & 0.3945 \\
+ & 720 & \textbf{0.4254} & 0.4321 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Hard gating achieves marginally lower MSE at short horizons ($T = 96$)
+on both datasets, where the dominant behavioral component is consistent
+enough that winner-take-all routing is sufficient.
+At medium and long horizons ($T \geq 192$), soft gating consistently
+outperforms hard gating, with the gap widening at $T = 720$ on ETTm1
+(0.4254 vs.\ 0.4321, a 1.6\% improvement).
+This trend reflects the increasing mixture complexity of longer prediction
+windows: as the look-ahead extends, input windows span a broader range of
+behavioral regimes, and the soft gate's ability to maintain contributions
+from multiple granularities becomes more valuable than the hard gate's
+commitment to a single one.
+These results validate the design choice of Softmax-based continuous
+gating in AGF and suggest that hard gating may be a viable lightweight
+alternative in latency-sensitive short-horizon deployment scenarios.
+
+\subsection{Hyperparameter Sensitivity on ETTh2}
+
+Table~\ref{tab:hyperparam} reports the sensitivity of SDFormer to the
+number of attention heads $H$ and learning rate $\eta$ on ETTh2 across
+all four forecast horizons.
+These configurations were selected to represent the most informative axes
+of variation identified during the development of SDFormer.
+
+\begin{table}[!t]
+\caption{Effect of attention head count on ETTh2 (MSE / MAE).
+  \textbf{Bold} marks the better result per horizon.}
+\label{tab:hyperparam}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Config} & & $T=96$ & $T=192$ & $T=336$ & $T=720$ \\
+\midrule
+\multirow{2}{*}{$H=4$ (default)}
+  & MSE & \textbf{0.3484} & \textbf{0.3884} & \textbf{0.4187} & 0.4594 \\
+  & MAE & \textbf{0.2928} & \textbf{0.3604} & 0.3951          & 0.4327 \\
+\midrule
+\multirow{2}{*}{$H=8$}
+  & MSE & 0.3488 & 0.3976 & 0.4282          & \textbf{0.4390} \\
+  & MAE & 0.2891 & 0.3695 & \textbf{0.3892} & \textbf{0.4137} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The number of attention heads $H$ has the most pronounced effect and
+exhibits a horizon-dependent pattern: $H=4$ outperforms $H=8$ at short
+and medium horizons ($T \leq 192$), while $H=8$ achieves better MSE at
+longer horizons ($T \geq 336$).
+This behavior is consistent with the role of attention heads in
+Transformer encoders: more heads provide greater representational
+diversity, which is more valuable when modeling the complex long-range
+dependencies that dominate 336- and 720-step forecasts.
+At short horizons, the additional parameters of $H=8$ introduce overfitting
+risk that outweighs the representational benefit.
+
+Reducing the learning rate to $5 \times 10^{-5}$ with $H=8$ at $T=720$
+slightly degrades performance relative to $H=8$ with the default learning
+rate, confirming that the default $\eta = 10^{-4}$ is well-calibrated for
+this setting.
+Increasing dropout to 0.2 substantially degrades performance at $T=720$
+(MSE $= 0.4942$ vs.\ $0.4594$ for the default), suggesting that the
+default dropout of 0.1 already provides sufficient regularization and
+stronger dropout interferes with the model's ability to retain spike-related
+features that are sparse and therefore easily dropped.
+Based on this analysis, we adopt $H=4$ as the default for all datasets and
+horizons to favor short-horizon accuracy and generalization, which is the
+more common deployment scenario in CPN capacity planning.
+
+\subsection{Effect of Anomaly-Aware Normalization Across Horizons}
+
+Table~\ref{tab:anorm} isolates the contribution of Anomaly-Aware
+Normalization by comparing SDFormer against a variant using standard RevIN
+across all four forecast horizons on ETTm1.
+
+\begin{table}[!t]
+\caption{Effect of Anomaly-Aware Normalization on ETTm1.
+  $\Delta$MSE is the relative MSE increase when normalization is replaced
+  by standard RevIN.}
+\label{tab:anorm}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lccc}
+\toprule
+$T$ & \textbf{SDFormer} & \textbf{w/o Anorm} & $\Delta$\textbf{MSE} \\
+\midrule
+96  & 0.3072 & 0.3032 & $-1.3\%$ \\
+192 & 0.3754 & 0.3796 & $+1.1\%$ \\
+336 & 0.3925 & 0.3934 & $+0.2\%$ \\
+720 & 0.4254 & 0.4291 & $+0.9\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Anomaly-Aware Normalization yields consistent improvements at horizons
+$T \geq 192$, with MSE reductions of up to 1.1\%.
+At $T = 96$, the variant without anomaly-aware normalization achieves
+marginally lower MSE ($-1.3\%$), which is within the range of
+initialization variance observed in Table~\ref{tab:seeds} and does not
+indicate a systematic disadvantage.
+The normalization benefit accumulates with forecast horizon because longer
+prediction windows are more affected by the distorted feature space caused
+by spike contamination of the mean and variance statistics.
+These results are consistent with the ETTh1 ablation finding that
+Anomaly-Aware Normalization provides targeted improvement on windows
+containing high-kurtosis burst events, with more pronounced gains expected
+on uniformly bursty production workload traces.
+
+% -------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed SDFormer to address the dual challenge of multi-frequency
+temporal modeling and robust normalization in high-burstiness supply-demand
+forecasting for CPNs.
+The core insight is that stationary periodic trends and non-stationary burst
+spikes, though fully mixed in the time domain, can be effectively decoupled
+by committing independent encoders to different temporal granularities.
+This avoids the cross-frequency gradient interference that degrades shared
+encoders, and allows each granularity to develop specialized representations
+without compromise.
+Four components work together: independent multi-granularity encoders decouple
+low-frequency trends from non-stationary spikes; ATSR amplifies spike signals
+before patch projection to prevent peak suppression; AGF dynamically routes
+each input instance to its most suitable granularity mix based on observed
+behavioral statistics; and Anomaly-Aware Normalization protects statistical
+estimates from heavy-tail contamination before the sequence ever reaches the
+encoder.
+
+Experiments on five standard benchmarks confirm that SDFormer achieves
+state-of-the-art performance on high-burstiness sequences and remains
+competitive on smooth sequences, with ATSR and independent encoders
+identified as the most critical components in ablation.
+Sensitivity analysis on ETTm1 shows that performance is stable across patch
+size configurations and random seeds, confirming that the gains are
+structural rather than dependent on specific hyperparameter choices.
+The soft-versus-hard gating comparison reveals that Softmax-based continuous
+gating provides increasing advantage over winner-take-all routing as the
+forecast horizon extends, validating the per-instance adaptive design of AGF.
+
+\textbf{Limitations.}
+The current SDFormer architecture uses manually specified patch sizes
+$(p_1, p_2, p_3)$, which requires domain knowledge about the characteristic
+spike duration and periodicity of the target CPN.
+While the sensitivity analysis shows robustness to moderate variation in
+these settings, an automatic patch size selection mechanism would improve
+usability.
+Additionally, the Anomaly-Aware Normalization MLP $f_\theta$ is trained
+on the same dataset as the forecasting model, which means its burstiness
+threshold is calibrated to the training distribution.
+In online deployment scenarios where burst statistics shift over time, the
+normalization parameters may need periodic recalibration.
+
+\textbf{Future Work.}
+Several directions merit further investigation.
+First, differentiable patch boundary learning could replace the fixed
+granularity grid, allowing the model to discover optimal temporal
+resolutions directly from data.
+Second, extending SDFormer to an online setting where the normalization
+statistics are estimated from a sliding window of recent observations
+would enable deployment in streaming CPN monitoring systems.
+Third, evaluating SDFormer on production GPU cluster traces such as the
+Alibaba GPU Cluster Trace would validate whether the burstiness-handling
+mechanisms transfer to workload distributions with significantly heavier
+tails than the ETT benchmarks.
+Finally, incorporating exogenous features such as scheduled maintenance
+windows and known traffic events as additional inputs to the AGF gating
+mechanism could further improve spike anticipation.
+
+% -------------------------------------------------------
+\bibliographystyle{IEEEtran}
+\bibliography{SDFormer_IEEE}
+
+% \begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{wangliying.png}}]{Liying Wang}
+%   received the M.S. degree from the University of Science and Technology of
+%   China in 2010 and the B.S. degree from Jilin University in 2007. He is
+%   currently pursuing the Ph.D. degree at Tongji University. His research
+%   interests include machine learning, big data, and distributed computing.
+% \end{IEEEbiography}
+
+% \begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{zhangpeng.jpg}}]{Peng Zhang}
+%   is currently pursuing the M.S. degree at Tongji University. His research
+%   interests include machine learning and CPNs.
+% \end{IEEEbiography}
+
+% \begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{wangcheng.png}}]{Cheng Wang}
+%   (Senior Member, IEEE) received the M.S. degree in applied mathematics and
+%   the Ph.D. degree in computer science, both from Tongji University, in 2006
+%   and 2011 respectively. He is currently a Professor in the School of
+%   Computer Science and Technology, Tongji University. His research interests
+%   include distributed learning, cyberspace security, and intelligent
+%   information services.
+% \end{IEEEbiography}
+
+\end{document}

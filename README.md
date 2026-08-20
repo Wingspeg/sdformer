@@ -126,6 +126,44 @@ SDFormer/
 ```
 
 ---
+## 致谢
+
+本项目基于 [Time-Series-Library](https://github.com/thuml/Time-Series-Library) 框架实现，感谢 PatchTST 和 iTransformer 的开源工作。
+
+## 仓库地址
+
+https://github.com/Wingspeg/sdformer
+
+## CPN 调度仿真
+
+`cpn_simulation/` 目录下提供一个 M 站点 × K 维资源的算力网络供需仿真器，把论文 Section 3.1 的系统模型（supply / demand / gap / cost C）端到端跑起来。
+
+```
+cpn_simulation/
+├── cpn_simulator.py    # 多站点 demand 仿真器（周期 + i.i.d. 重尾 burst）
+├── cpn_runner.py       # 训练 + 调度评估 runner（SDFormer/PatchTST/iTransformer/WPMixer + Reactive/MA/Perfect）
+└── results.json        # 4 horizon × 4 model 评估结果
+```
+
+**生成数据**
+
+```bash
+python cpn_simulation/cpn_simulator.py --out_dir dataset/CPN-sim
+```
+
+**跑仿真**（CPU 上几分钟）
+
+```bash
+python cpn_simulation/cpn_runner.py \
+  --horizons 24 48 96 168 \
+  --epochs 8 \
+  --models SDFormer PatchTST iTransformer WPMixer \
+  --no_cuda
+```
+
+仿真结果会覆盖 `cpn_simulation/results.json`。
+
+---
 ## License
 
 MIT — see [LICENSE](LICENSE).
