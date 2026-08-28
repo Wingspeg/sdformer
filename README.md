@@ -166,4 +166,4 @@ Simulation results overwrite `cpn_simulation/results.json`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](./LICENSE) © 2026 Wingspeg.
