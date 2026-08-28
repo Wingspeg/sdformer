@@ -2,37 +2,35 @@
 
 **SDFormer: Multi-Granularity Time Series Modeling for Computing Power Network Supply-Demand Forecasting**
 
-> 面向算力网络供需预测的多粒度时序建模方法
+---
+
+## Overview
+
+Supply-demand series in computing power networks combine **regular low-frequency periodic components** with **irregular high-frequency burst components**, fully aliased in the time domain. This poses two challenges for classical time-series forecasting: a single fixed window cannot serve both regimes, and mean/variance-based instance normalization is highly sensitive to sparse extreme values.
+
+SDFormer tackles this from a behavior-decoupling perspective with four core components:
+
+| Component | Function |
+|-----------|----------|
+| **Multi-Granularity Independent Encoding** | Three parallel Transformer encoders model high-frequency abrupt changes, transition bands, and low-frequency trends separately, eliminating cross-granularity gradient interference. |
+| **ATSR** (Adaptive Temporal Salience Recalibration) | Introduces learnable point-wise weights before local window projection, automatically amplifying irregular burst signals so peaks are not diluted. |
+| **AGF** (Adaptive Granularity Gating Fusion) | Dynamically generates per-granularity contribution weights from global context; leans fine-grained during high-burst periods and coarse-grained during stable periods. |
+| **Anomaly-Aware Normalization** | Uses kurtosis and tail probability as features to adaptively interpolate convexly between median/MAD and mean/std, protecting the feature space from the input side. |
 
 ---
 
-## 简介
+## Main Results
 
-算力网络资源供需序列同时包含**常态化低频周期成分**与**非常态化高频尖峰成分**，两者在时域完全混叠，给传统时序预测方法带来双重挑战：单一固定窗口无法同时适配两类行为，基于均值/方差的实例归一化对稀疏极端值高度敏感。
+Compared with PatchTST, iTransformer, Autoformer, and FEDformer on five benchmark datasets (ETTh1, ETTh2, ETTm1, ETTm2, Weather):
 
-SDFormer 从行为解耦的视角出发，提出四个核心组件：
-
-| 组件 | 功能 |
-|------|------|
-| **多粒度独立编码** | 三个并行 Transformer 编码器分别建模高频突变、过渡频段、低频趋势，消除跨粒度梯度干扰 |
-| **ATSR**（自适应时序显著性重校准） | 在局部窗口投影前引入可学习逐点权重，自动放大非常态突变信号，防止尖峰被稀释 |
-| **AGF**（自适应多粒度门控融合） | 依据全局上下文动态生成各粒度贡献权重，高突发性时偏向细粒度，平稳时偏向粗粒度 |
-| **异常感知归一化** | 以峰度和尾概率为特征，自适应在中位数/MAD 与均值/标准差之间凸插值，从输入端保护特征空间 |
+- ETTh1 96-step MSE: **7.6% lower** than PatchTST, **7.5% lower** than iTransformer
+- ETTh1 192-step MSE: **14.9% lower** than PatchTST
+- Best across all prediction horizons on ETTh2
+- Competitive on ETTm / Weather medium- and long-term forecasts (≥ 336 steps)
 
 ---
 
-## 主要结果
-
-在 ETTh1/ETTh2/ETTm1/ETTm2/Weather 五个基准数据集上与 PatchTST、iTransformer、Autoformer、FEDformer 对比：
-
-- ETTh1 96步 MSE 较 PatchTST **降低 7.6%**，较 iTransformer **降低 7.5%**
-- ETTh1 192步 MSE 较 PatchTST **降低 14.9%**
-- ETTh2 全部预测步长最优
-- ETTm/Weather 中长期预测（336步以上）保持竞争力
-
----
-
-## 环境要求
+## Requirements
 
 ```
 Python   3.12.3
@@ -40,7 +38,7 @@ PyTorch  2.5.1
 CUDA     12.1
 ```
 
-安装依赖：
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -48,9 +46,9 @@ pip install -r requirements.txt
 
 ---
 
-## 数据准备
+## Data Preparation
 
-从 [Time-Series-Library](https://github.com/thuml/Time-Series-Library) 下载数据集，放置于 `./dataset/` 目录：
+Download the datasets from [Time-Series-Library](https://github.com/thuml/Time-Series-Library) and place them under `./dataset/`:
 
 ```
 dataset/
@@ -65,9 +63,9 @@ dataset/
 
 ---
 
-## 快速开始
+## Quick Start
 
-**训练**
+**Training**
 
 ```bash
 python run.py \
@@ -86,7 +84,7 @@ python run.py \
   --train_epochs 20
 ```
 
-**复现论文结果**
+**Reproducing paper results**
 
 ```bash
 bash scripts/run_all.sh
@@ -94,29 +92,29 @@ bash scripts/run_all.sh
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 SDFormer/
 ├── models/
-│   └── SDFormer.py          # 模型主体
+│   └── SDFormer.py          # Main model
 ├── layers/
-│   ├── anomaly_norm.py      # 异常感知归一化
-│   ├── atsr.py              # 自适应时序显著性重校准
-│   └── agf.py               # 自适应多粒度门控融合
-├── data_provider/           # 数据加载
-├── exp/                     # 训练/评估流程
-├── scripts/                 # 复现脚本
-├── dataset/                 # 数据集（需自行下载）
+│   ├── anomaly_norm.py      # Anomaly-aware normalization
+│   ├── atsr.py              # Adaptive Temporal Salience Recalibration
+│   └── agf.py               # Adaptive Granularity Gating Fusion
+├── data_provider/           # Data loading
+├── exp/                     # Training / evaluation pipeline
+├── scripts/                 # Reproduction scripts
+├── dataset/                 # Datasets (download separately)
 ├── run.py
 └── requirements.txt
 ```
 
 ---
 
-## 引用
+## Citation
 
-如果本工作对您有帮助，请引用：
+If this work is helpful, please cite:
 
 ```bibtex
 @article{sdformer2026,
@@ -126,32 +124,33 @@ SDFormer/
 ```
 
 ---
-## 致谢
 
-本项目基于 [Time-Series-Library](https://github.com/thuml/Time-Series-Library) 框架实现，感谢 PatchTST 和 iTransformer 的开源工作。
+## Acknowledgements
 
-## 仓库地址
+This project is built on the [Time-Series-Library](https://github.com/thuml/Time-Series-Library) framework. We thank the open-source work of PatchTST and iTransformer.
+
+## Repository
 
 https://github.com/Wingspeg/sdformer
 
-## CPN 调度仿真
+## CPN Scheduling Simulation
 
-`cpn_simulation/` 目录下提供一个 M 站点 × K 维资源的算力网络供需仿真器，把论文 Section 3.1 的系统模型（supply / demand / gap / cost C）端到端跑起来。
+The `cpn_simulation/` directory provides an M-site × K-resource supply-demand simulator for computing power networks, end-to-end running the system model (supply / demand / gap / cost C) from Section 3.1 of the paper.
 
 ```
 cpn_simulation/
-├── cpn_simulator.py    # 多站点 demand 仿真器（周期 + i.i.d. 重尾 burst）
-├── cpn_runner.py       # 训练 + 调度评估 runner（SDFormer/PatchTST/iTransformer/WPMixer + Reactive/MA/Perfect）
-└── results.json        # 4 horizon × 4 model 评估结果
+├── cpn_simulator.py    # Multi-site demand simulator (periodic + i.i.d. heavy-tailed burst)
+├── cpn_runner.py       # Training + scheduling evaluation runner (SDFormer/PatchTST/iTransformer/WPMixer + Reactive/MA/Perfect)
+└── results.json        # 4-horizon × 4-model evaluation results
 ```
 
-**生成数据**
+**Generate data**
 
 ```bash
 python cpn_simulation/cpn_simulator.py --out_dir dataset/CPN-sim
 ```
 
-**跑仿真**（CPU 上几分钟）
+**Run simulation** (a few minutes on CPU)
 
 ```bash
 python cpn_simulation/cpn_runner.py \
@@ -161,9 +160,10 @@ python cpn_simulation/cpn_runner.py \
   --no_cuda
 ```
 
-仿真结果会覆盖 `cpn_simulation/results.json`。
+Simulation results overwrite `cpn_simulation/results.json`.
 
 ---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
