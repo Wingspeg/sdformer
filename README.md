@@ -167,3 +167,5 @@ Simulation results overwrite `cpn_simulation/results.json`.
 ## License
 
 [MIT](./LICENSE) © 2026 Wingspeg.
+
+Built on the THUML [Time-Series-Library](https://github.com/thuml/Time-Series-Library) (© 2021 THUML @ Tsinghua University).
